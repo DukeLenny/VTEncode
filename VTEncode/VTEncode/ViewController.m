@@ -72,6 +72,7 @@ void compressionOutputCallback(void *outputCallbackRefCon, void *sourceFrameRefC
         return;
     }
     
+    //不存在则代表压缩不成功或帧丢失, or if(!sampleBuffer) return;
     if (!CMSampleBufferDataIsReady(sampleBuffer))
     {
         return;
@@ -79,8 +80,18 @@ void compressionOutputCallback(void *outputCallbackRefCon, void *sourceFrameRefC
     
     ViewController *vc = (__bridge ViewController *)outputCallbackRefCon;
     
+    CFArrayRef array = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, true);
+    if (!array || CFArrayGetCount(array) <= 0)
+    {
+        return;
+    }
+    CFDictionaryRef dic = CFArrayGetValueAtIndex(array, 0);
+    if (!dic)
+    {
+        return;
+    }
     //判断当前帧是否为关键帧
-    bool isKeyFrame = !CFDictionaryContainsKey(CFArrayGetValueAtIndex(CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, true), 0), kCMSampleAttachmentKey_NotSync);
+    bool isKeyFrame = !CFDictionaryContainsKey(dic, kCMSampleAttachmentKey_NotSync);
     
     //获取sps & pps数据.sps pps只需获取一次,保存在h264文件开头即可
     if (isKeyFrame && !vc->_spsppsFound)
@@ -99,6 +110,8 @@ void compressionOutputCallback(void *outputCallbackRefCon, void *sourceFrameRefC
             vc->_spsppsFound = 1;
             [vc writeH264Data:(void *)spsData length:spsSize addStartCode:YES];
             [vc writeH264Data:(void *)ppsData length:ppsSize addStartCode:YES];
+//          sps = [NSData dataWithBytes:spsData length:spsSize];
+//          pps = [NSData dataWithBytes:ppsData length:ppsSize];
         }
     }
     
@@ -111,17 +124,21 @@ void compressionOutputCallback(void *outputCallbackRefCon, void *sourceFrameRefC
     if (error == noErr)
     {
         size_t offset = 0;
-        const int lengthInfoSize = 4; //返回的nalu数据前四个字节不是00 00 00 01的start code,而是大端模式的帧长度length
+        static const int lengthInfoSize = 4; //返回的nalu数据前四个字节不是00 00 00 01的start code,而是大端模式的帧长度length
         
         while (offset < totalLength - lengthInfoSize)
         {
             uint32_t naluLength = 0;
             memcpy(&naluLength, data + offset, lengthInfoSize); //获取nalu的长度
             
-            //大端模式转化为系统端模式
+            //大端模式转化为系统端模式,字节从高位反转到低位
             naluLength = CFSwapInt32BigToHost(naluLength);
             
             [vc writeH264Data:data + offset + lengthInfoSize length:naluLength addStartCode:YES];
+//            RTAVVideoFrame *frame = [RTAVVideoFrame new];
+//            frame.sps = sps;
+//            frame.pps = pps;
+//            frame.data = [NSData dataWithBytes:data + offset + lengthInfoSize length:naluLength];
             
             //读取下一个nalu,一次回调可能包含多个nalu
             offset += lengthInfoSize + naluLength;
@@ -183,6 +200,7 @@ void compressionOutputCallback(void *outputCallbackRefCon, void *sourceFrameRefC
         CMTime pts = CMTimeMake(self->_frameCount, 1000);
         CMTime duration = kCMTimeInvalid;
         
+        //如果使用异步运行, kVTEncodeInfo_Asynchronous 被设置；同步运行, kVTEncodeInfo_FrameDropped 被设置；设置NULL为不想接受这个信息.
         VTEncodeInfoFlags infoFlagsOut;
         
         OSStatus status = VTCompressionSessionEncodeFrame(self->_encodeSession, imageBuffer, pts, duration, NULL, NULL, &infoFlagsOut);
@@ -233,6 +251,7 @@ void compressionOutputCallback(void *outputCallbackRefCon, void *sourceFrameRefC
     }
     
     OSStatus status;
+    //当VTCompressionSessionEncodeFrame被调用压缩一次后会被异步调用. 注:当你设置NULL的时候,你需要调用VTCompressionSessionEncodeFrameWithOutputHandler方法进行压缩帧处理,支持iOS9.0以上
     VTCompressionOutputCallback encodeOutputCallback = compressionOutputCallback;
     status = VTCompressionSessionCreate(kCFAllocatorDefault, width, height, kCMVideoCodecType_H264, NULL, NULL, NULL, encodeOutputCallback, (__bridge void *)self, &_encodeSession);
     
@@ -257,7 +276,7 @@ void compressionOutputCallback(void *outputCallbackRefCon, void *sourceFrameRefC
     //设置帧率,只用于初始化session,不是实际FPS
     status = VTSessionSetProperty(_encodeSession, kVTCompressionPropertyKey_ExpectedFrameRate, (__bridge CFTypeRef)@(fps));
     
-    //开始编码
+    //可选
     status = VTCompressionSessionPrepareToEncodeFrames(_encodeSession);
     
     return 0;
